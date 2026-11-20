@@ -104,10 +104,11 @@ function docDir(int $id): string {
 //            'user' => session user or null, 'token' => share token or null].
 // A logged-in non-owner falls back to the share token, so share links also
 // work for people who happen to have an account.
-function resolveDocAccess(int $id, string $shareToken = ''): ?array {
+function resolveDocAccess(int $id, string $shareToken = '', bool $allowTrashed = false): ?array {
     if ($id <= 0) return null;
-    $doc = dbRow("SELECT id, title, owner FROM typst_documents WHERE id=?", "i", $id);
+    $doc = dbRow("SELECT id, title, owner, deleted_at FROM typst_documents WHERE id=?", "i", $id);
     if (!$doc) return null;
+    if ($doc['deleted_at'] !== null && !$allowTrashed) return null; // trashed docs are invisible to everyone
 
     $user = currentUser();
     if ($user && hash_equals($doc['owner'], (string)$user['sub'])) {
@@ -124,9 +125,9 @@ function resolveDocAccess(int $id, string $shareToken = ''): ?array {
 
 // $need: 'view' (owner or any share link), 'edit' (owner or edit link),
 // 'owner' (owner only — sharing, git, delete, duplicate, rename).
-function requireDoc(int $id, string $need = 'view'): array {
+function requireDoc(int $id, string $need = 'view', bool $allowTrashed = false): array {
     $token = requestShareToken();
-    $doc   = resolveDocAccess($id, $token);
+    $doc   = resolveDocAccess($id, $token, $allowTrashed);
     if (!$doc) {
         if (!currentUser() && $token === '') fail('unauthenticated', 401);
         fail('Not found', 404);
@@ -263,6 +264,13 @@ function cleanTitle($title, string $default = 'Untitled Document'): string {
     $title = is_string($title) ? trim(preg_replace('/[\x00-\x1f\x7f]/', ' ', $title)) : '';
     if ($title === '') return $default;
     return mb_substr($title, 0, 200);
+}
+
+// Permanently remove a document: row, files and compile workspace.
+function purgeDocument(int $id): void {
+    dbExec("DELETE FROM typst_documents WHERE id=?", "i", $id);
+    destroyCompileWorkspace($id);
+    rrmdir(docDir($id));
 }
 
 // ── Compile workspace ────────────────────────────────────────────────────────

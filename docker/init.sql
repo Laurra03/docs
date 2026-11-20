@@ -14,6 +14,9 @@ CREATE TABLE IF NOT EXISTS typst_documents (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Soft delete: NULL = live, otherwise the time it was moved to the trash.
+ALTER TABLE typst_documents ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL DEFAULT NULL;
+
 CREATE TABLE IF NOT EXISTS document_shares (
     id          INT AUTO_INCREMENT PRIMARY KEY,
     document_id INT NOT NULL,

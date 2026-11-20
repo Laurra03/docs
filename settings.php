@@ -64,14 +64,10 @@ $themeClass = $isDark ? "dark" : "light";
             Add this public key to your GitHub or GitLab account to allow pushing from Docs.
         </p>
         <div class="git-pub-key-wrap" id="sshKeyWrap">
-            <textarea id="sshPubKey" class="git-pub-key-box git-pub-key-blurred" rows="4" readonly spellcheck="false">Loading…</textarea>
-            <div class="git-pub-key-overlay" id="sshKeyOverlay" onclick="revealPubKey()">
-                <i class="ri-eye-line"></i> Click to reveal
-            </div>
+            <textarea id="sshPubKey" class="git-pub-key-box" rows="4" readonly spellcheck="false">Loading…</textarea>
         </div>
         <div class="git-btn-row">
             <button class="git-secondary-btn" onclick="copyPubKey()"><i class="ri-file-copy-line"></i> Copy</button>
-            <button class="git-secondary-btn" onclick="hidePubKey()"><i class="ri-eye-off-line"></i> Hide</button>
             <button class="git-secondary-btn" onclick="regenKey()"><i class="ri-refresh-line"></i> Regenerate</button>
         </div>
     </div>
@@ -122,7 +118,8 @@ function setTheme(isLight) {
     var val = isLight ? '1' : '0';
     var maxAge = 365 * 24 * 3600;
     document.cookie = 'darkmode=' + val + '; path=/; SameSite=Lax; max-age=' + maxAge;
-    document.body.className = isLight ? 'light' : 'dark';
+    document.body.classList.toggle('light', isLight);
+    document.body.classList.toggle('dark', !isLight);
     document.getElementById('themeLight').classList.toggle('active', isLight);
     document.getElementById('themeDark').classList.toggle('active', !isLight);
 }
@@ -138,16 +135,6 @@ function loadSshKey() {
         else document.getElementById('sshPubKey').value = 'Error: ' + res.error;
     };
     xhr.send('');
-}
-
-function revealPubKey() {
-    document.getElementById('sshPubKey').classList.remove('git-pub-key-blurred');
-    document.getElementById('sshKeyOverlay').style.display = 'none';
-}
-
-function hidePubKey() {
-    document.getElementById('sshPubKey').classList.add('git-pub-key-blurred');
-    document.getElementById('sshKeyOverlay').style.display = '';
 }
 
 function copyPubKey() {

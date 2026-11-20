@@ -54,6 +54,8 @@ $cmTheme = $isDark ? "dracula" : "default";
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
 html, body { height: 100%; overflow: hidden; }
+/* The raw textarea would flash (white, unstyled) until CodeMirror replaces it */
+#codeEditor { display: none; }
 /* Autocomplete hint widget */
 .CodeMirror-hints {
     background: #1e1e2e;
@@ -1128,6 +1130,7 @@ function renderDocSettings() {
 }
 
 // ── File list ─────────────────────────────────────────────────────────────────
+var restoredLastFile = false;
 function loadFileList() {
     renderFileList(); // always show main.typ immediately
     var xhr = new XMLHttpRequest();
@@ -1147,6 +1150,12 @@ function loadFileList() {
             });
         }
         renderFileList();
+        if (!restoredLastFile) {
+            restoredLastFile = true;
+            var last = (savedAtLoad || readPos()).last;
+            var f = last && last !== 'main.typ' && extraFiles.filter(function(x) { return x.filename === last; })[0];
+            if (f) switchFile({ id: f.id, filename: f.filename });
+        }
     };
     xhr.onerror = function() { renderFileList(); };
     xhr.send('document_id=' + DOC_ID);
@@ -1471,6 +1480,7 @@ function addFolder() {
 }
 
 function switchFile(file) {
+    clearTimeout(posTimer);
     // Cancel any pending auto-save so it can't fire after activeFile changes
     clearTimeout(saveTimer);
     // Flush current editor content to cache
@@ -1495,6 +1505,7 @@ function switchFile(file) {
     if (file.isAsset) {
         if (assetCache[file.filename] !== undefined) {
             editor.setValue(assetCache[file.filename]);
+            restorePos();
             switchingFile = false;
         } else {
             editor.setValue('');
@@ -1502,17 +1513,19 @@ function switchFile(file) {
                 .then(function(r) { return r.text(); })
                 .then(function(text) {
                     assetCache[file.filename] = text;
-                    if (activeFile.isAsset && activeFile.filename === file.filename) editor.setValue(text);
+                    if (activeFile.isAsset && activeFile.filename === file.filename) { editor.setValue(text); restorePos(); }
                     switchingFile = false;
                 })
                 .catch(function() { switchingFile = false; });
         }
     } else if (file.id === null) {
         editor.setValue(mainContent);
+        restorePos();
         switchingFile = false;
     } else {
         if (fileCache[file.id] !== undefined) {
             editor.setValue(fileCache[file.id]);
+            restorePos();
             switchingFile = false;
         } else {
             editor.setValue('');
@@ -1524,7 +1537,7 @@ function switchFile(file) {
                 try { res = JSON.parse(xhr.responseText); } catch(e) { switchingFile = false; return; }
                 if (res.ok) {
                     fileCache[file.id] = res.content;
-                    if (activeFile.id === file.id) editor.setValue(res.content);
+                    if (activeFile.id === file.id) { editor.setValue(res.content); restorePos(); }
                 }
                 switchingFile = false;
             };
@@ -1980,6 +1993,40 @@ editor.on('change', function() {
     }
 });
 editor.on('cursorActivity', updateSelectionStats);
+
+// ── Remember last open file and cursor/scroll position per document ──
+var POS_KEY  = 'typst_pos_' + DOC_ID;
+var savedAtLoad = null; // snapshot taken before anything overwrites it
+var posTimer = null;
+function readPos() { try { return JSON.parse(localStorage.getItem(POS_KEY)) || {}; } catch(e) { return {}; } }
+function writePos() {
+    try {
+        var p = readPos();
+        p.files = p.files || {};
+        p.last  = activeFile.filename;
+        var c = editor.getCursor();
+        p.files[activeFile.filename] = { line: c.line, ch: c.ch, top: editor.getScrollInfo().top };
+        localStorage.setItem(POS_KEY, JSON.stringify(p));
+    } catch(e) {}
+}
+function savePos() {
+    if (switchingFile) return;
+    clearTimeout(posTimer);
+    posTimer = setTimeout(writePos, 300);
+}
+function restorePos() {
+    var s = (readPos().files || {})[activeFile.filename];
+    if (s) {
+        editor.setCursor({ line: Math.min(s.line, editor.lastLine()), ch: s.ch });
+        editor.scrollTo(null, s.top || 0);
+    }
+    writePos(); // also records which file is now open
+}
+editor.on('cursorActivity', savePos);
+editor.on('scroll', savePos);
+window.addEventListener('pagehide', function() { if (!switchingFile) writePos(); }); // flush a pending save on reload/close
+savedAtLoad = readPos();
+setTimeout(restorePos, 0); // after first layout so scrollTo isn't clamped
 updateStats();
 loadFileList();
 loadImageList();

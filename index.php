@@ -2,7 +2,16 @@
 require __DIR__ . '/lib.php';
 $user = requireAuth();
 
-$stmt = db()->prepare("SELECT id, title, created_at, updated_at FROM typst_documents WHERE owner=? ORDER BY updated_at DESC");
+$trash = isset($_GET['trash']);
+
+// Trash is emptied automatically after 30 days.
+$old = db()->prepare("SELECT id FROM typst_documents WHERE owner=? AND deleted_at < NOW() - INTERVAL 30 DAY");
+$old->bind_param("s", $user['sub']);
+$old->execute();
+foreach ($old->get_result()->fetch_all(MYSQLI_ASSOC) as $r) purgeDocument((int)$r['id']);
+$old->close();
+
+$stmt = db()->prepare("SELECT id, title, created_at, updated_at, deleted_at FROM typst_documents WHERE owner=? AND deleted_at IS " . ($trash ? "NOT NULL" : "NULL") . " ORDER BY updated_at DESC");
 $stmt->bind_param("s", $user['sub']);
 $stmt->execute();
 $docs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -15,7 +24,7 @@ $themeClass = $isDark ? "dark" : "light";
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docs - Library</title>
+<title>Docs - <?= $trash ? 'Trash' : 'Library' ?></title>
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
@@ -27,14 +36,20 @@ $themeClass = $isDark ? "dark" : "light";
 <body class="<?= $themeClass ?>">
 
 <div class="topbar">
-    <img src="/logo.svg" class="topbar-logo" alt="logo">
-    <span class="topbar-title">Docs</span>
+    <a href="/" title="Library" style="display:flex;align-items:center;gap:12px">
+        <img src="/logo.svg" class="topbar-logo" alt="logo">
+        <span class="topbar-title" style="flex:none">Docs</span>
+    </a>
+    <span style="flex:1"></span>
     <button class="topbar-btn secondary" onclick="openImportModal()">
         <i class="ri-upload-2-line" style="vertical-align:middle;margin-right:4px"></i>Import
     </button>
     <button class="topbar-btn" id="newDocBtn" onclick="newDoc()">
         <i class="ri-add-line" style="vertical-align:middle;margin-right:4px"></i>New Document
     </button>
+    <a class="topbar-icon-btn" href="<?= $trash ? '/' : '/?trash=1' ?>" title="<?= $trash ? 'Back to library' : 'Trash' ?>" style="display:flex;align-items:center;justify-content:center<?= $trash ? ';color:var(--colorTheme)' : '' ?>">
+        <i class="<?= $trash ? 'ri-delete-bin-fill' : 'ri-delete-bin-line' ?>"></i>
+    </a>
     <div class="user-avatar-wrap">
         <button class="user-avatar" onclick="toggleUserMenu(event)"><?= htmlspecialchars(mb_strtoupper(mb_substr($user['name'], 0, 1))) ?></button>
         <div class="user-menu" id="userMenu">
@@ -47,7 +62,7 @@ $themeClass = $isDark ? "dark" : "light";
 
 <div class="library-body">
     <div class="library-header">
-        <h1>Your Documents</h1>
+        <h1><?= $trash ? 'Trash' : 'Your Documents' ?></h1>
         <span id="docCount" style="font-size:13px;color:var(--grayText)"><?= count($docs) ?> document<?= count($docs) !== 1 ? 's' : '' ?></span>
         <div class="search-sort-group">
             <div class="search-wrap">
@@ -66,13 +81,18 @@ $themeClass = $isDark ? "dark" : "light";
     <?php if (empty($docs)): ?>
     <div class="empty-state">
         <i class="ri-file-text-line"></i>
+        <?php if ($trash): ?>
+        <p style="font-size:16px;margin-bottom:8px">Trash is empty</p>
+        <p style="font-size:14px">Deleted documents stay here for 30 days</p>
+        <?php else: ?>
         <p style="font-size:16px;margin-bottom:8px">No documents yet</p>
         <p style="font-size:14px">Click <strong>New Document</strong> to get started</p>
+        <?php endif; ?>
     </div>
     <?php else: ?>
     <div class="doc-grid">
         <?php foreach ($docs as $doc): ?>
-        <div class="doc-card" onclick="openDoc(<?= (int)$doc['id'] ?>)" data-title="<?= htmlspecialchars(mb_strtolower($doc['title'])) ?>" data-updated="<?= (int)strtotime($doc['updated_at'] ?? '') ?>" data-created="<?= (int)strtotime($doc['created_at'] ?? '') ?>">
+        <div class="doc-card"<?= $trash ? '' : ' onclick="openDoc(' . (int)$doc['id'] . ')"' ?> data-title="<?= htmlspecialchars(mb_strtolower($doc['title'])) ?>" data-updated="<?= (int)strtotime($doc['updated_at'] ?? '') ?>" data-created="<?= (int)strtotime($doc['created_at'] ?? '') ?>">
             <div class="doc-card-preview">
                 <i class="ri-file-text-line" style="font-size:56px"></i>
             </div>
@@ -91,10 +111,16 @@ $themeClass = $isDark ? "dark" : "light";
 
 <!-- Card context menu -->
 <div class="card-menu" id="cardMenu">
+    <?php if ($trash): ?>
+    <button class="card-menu-item" onclick="restoreDoc()"><i class="ri-arrow-go-back-line"></i>Restore</button>
+    <div style="height:1px;background:var(--border);margin:4px 0"></div>
+    <button class="card-menu-item card-menu-danger" onclick="deleteDocFromMenu()"><i class="ri-delete-bin-line"></i>Delete forever</button>
+    <?php else: ?>
     <button class="card-menu-item" onclick="renameDoc()"><i class="ri-pencil-line"></i>Rename</button>
     <button class="card-menu-item" onclick="duplicateDoc()"><i class="ri-file-copy-line"></i>Duplicate</button>
     <div style="height:1px;background:var(--border);margin:4px 0"></div>
-    <button class="card-menu-item card-menu-danger" onclick="deleteDocFromMenu()"><i class="ri-delete-bin-line"></i>Delete</button>
+    <button class="card-menu-item card-menu-danger" onclick="deleteDocFromMenu()"><i class="ri-delete-bin-line"></i>Move to trash</button>
+    <?php endif; ?>
 </div>
 
 <!-- Import modal -->
@@ -316,9 +342,23 @@ function renameDoc() {
 
 function deleteDocFromMenu() {
     closeCardMenu();
-    if (!confirm('Delete "' + _menuDocTitle + '"? This cannot be undone.')) return;
+    var forever = <?= $trash ? 'true' : 'false' ?>;
+    if (forever && !confirm('Permanently delete "' + _menuDocTitle + '"? This cannot be undone.')) return;
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/delete.php', true);
+    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+    xhr.onload = function() {
+        var res = JSON.parse(xhr.responseText);
+        if (res.ok) window.location.reload();
+        else alert('Error: ' + res.error);
+    };
+    xhr.send('id=' + _menuDocId + (forever ? '&permanent=1' : ''));
+}
+
+function restoreDoc() {
+    closeCardMenu();
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/restore.php', true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
     xhr.onload = function() {
         var res = JSON.parse(xhr.responseText);
