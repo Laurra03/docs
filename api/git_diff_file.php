@@ -1,31 +1,17 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
 require __DIR__ . '/git_helpers.php';
-$user = requireAuthApi();
+apiInit();
+[$doc, $dir] = requireGitDoc(false);
+if (!is_dir($dir . '/.git')) jsonOut(['ok' => true, 'changes' => []]);
 
-$id       = (int)($_POST['id'] ?? 0);
-$filename = $_POST['filename'] ?? '';
+$filename = safeRelPath($_POST['filename'] ?? '');
+if ($filename === null) fail('Invalid filename');
 
-if ($filename === '' || strpos($filename, '..') !== false || ($filename[0] ?? '') === '/') {
-    echo json_encode(['ok' => false, 'error' => 'Invalid filename']); exit;
-}
+// --unified=0 gives no context lines - only changed lines appear in the output.
+[, $out] = runGit(['diff', '--no-ext-diff', '--no-textconv', '--unified=0', 'HEAD', '--', $filename], $dir);
 
-$dir = getDocDir($id, $user);
-if (!$dir) { echo json_encode(['ok' => false, 'error' => 'Not found']); exit; }
+jsonOut(['ok' => true, 'changes' => parseDiff($out)]);
 
-if (!is_dir($dir . '/.git')) {
-    echo json_encode(['ok' => true, 'changes' => []]);
-    exit;
-}
-
-// --unified=0 gives no context lines — only changed lines appear in the output.
-[$code, $out] = runGit(['diff', 'HEAD', '--unified=0', '--', $filename], $dir);
-
-$changes = parseDiff($out);
-echo json_encode(['ok' => true, 'changes' => $changes]);
-
-// ── Parse unified diff ────────────────────────────────────────────────────────
 function parseDiff(string $diff): array {
     $result  = [];
     $newLine = 0;
@@ -34,15 +20,16 @@ function parseDiff(string $diff): array {
     foreach (explode("\n", $diff) as $line) {
         if (substr($line, 0, 2) === '@@') {
             $inHunk = true;
-            if (preg_match('/\+(\d+)(?:,(\d+))?/', $line, $m)) $newLine = (int)$m[1];
+            if (preg_match('/\+(\d+)(?:,(\d+))?/', $line, $m)) {
+                // A pure deletion reports the line *before* the gap ("+N,0")
+                $newLine = (int)$m[1] + (($m[2] ?? '') === '0' ? 1 : 0);
+            }
             continue;
         }
-        if (!$inHunk) continue;
-        if ($line === '' || $line[0] === '\\') continue;
-        $ch = $line[0];
+        if (!$inHunk || $line === '' || $line[0] === '\\') continue;
+        $last = end($result);
 
-        if ($ch === '+') {
-            $last = end($result);
+        if ($line[0] === '+') {
             if ($last && $last['line'] === $newLine && $last['type'] === 'deleted') {
                 // deletion immediately followed by addition at same position → modified
                 $result[key($result)]['type'] = 'modified';
@@ -50,17 +37,9 @@ function parseDiff(string $diff): array {
                 $result[] = ['type' => 'added', 'line' => $newLine];
             }
             $newLine++;
-        } elseif ($ch === '-') {
-            $last = end($result);
-            if ($last && $last['line'] === $newLine && $last['type'] === 'added') {
-                // addition immediately followed by deletion → modified
-                $result[key($result)]['type'] = 'modified';
-            } elseif (!$last || $last['line'] !== $newLine) {
-                $result[] = ['type' => 'deleted', 'line' => $newLine];
-            }
+        } elseif ($line[0] === '-') {
             // multiple consecutive deletions at the same position → keep one entry
-        } elseif ($ch === ' ') {
-            $newLine++;
+            if (!$last || $last['line'] !== $newLine) $result[] = ['type' => 'deleted', 'line' => $newLine];
         }
     }
     return $result;

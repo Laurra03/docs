@@ -1,34 +1,27 @@
 <?php
-require __DIR__ . '/../auth/session.php';
-$user = requireAuthApi();
+require __DIR__ . '/../lib.php';
 
-$doc_id   = (int)($_GET['document_id'] ?? 0);
-$filename = ltrim($_GET['filename'] ?? '', '/');
-if (!$doc_id || !$filename) { http_response_code(400); exit; }
-if (strpos($filename, '..') !== false || strpos($filename, "\0") !== false ||
-    $filename === '' || $filename[0] === '/') {
-    http_response_code(400); exit;
-}
+$doc = resolveDocAccess((int)($_GET['document_id'] ?? 0), requestShareToken());
+if (!$doc) { http_response_code(currentUser() ? 404 : 403); exit; }
 
-// Verify ownership
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-$stmt = $db->prepare("SELECT id FROM typst_documents WHERE id=? AND owner=?");
-$stmt->bind_param("is", $doc_id, $user['sub']);
-$stmt->execute();
-$stmt->store_result();
-$found = $stmt->num_rows > 0;
-$stmt->close();
-$db->close();
+$rel  = safeRelPath($_GET['filename'] ?? '');
+$path = $rel === null ? null : pathInDir(docDir((int)$doc['id']), $rel);
+if ($path === null)   { http_response_code(400); exit; }
+if (!is_file($path))  { http_response_code(404); exit; }
 
-if (!$found) { http_response_code(403); exit; }
+// User-controlled files are served from our own origin: never let the browser
+// sniff or execute them. Only a few inert types are rendered inline.
+$inline = [
+    'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif',
+    'webp' => 'image/webp', 'avif' => 'image/avif', 'svg' => 'image/svg+xml', 'pdf' => 'application/pdf',
+];
+$ext  = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+$mime = $inline[$ext] ?? 'text/plain; charset=utf-8';
 
-$path = __DIR__ . "/../data/{$doc_id}/" . $filename;
-if (!file_exists($path) || !is_file($path)) { http_response_code(404); exit; }
-
-$mime = mime_content_type($path) ?: 'application/octet-stream';
 header('Content-Type: ' . $mime);
 header('Content-Length: ' . filesize($path));
-header('Cache-Control: private, max-age=3600');
+header('Cache-Control: private, no-cache');
 header('X-Content-Type-Options: nosniff');
-header('Content-Security-Policy: sandbox');
+header("Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+header('Content-Disposition: inline; filename="' . preg_replace('/[^a-zA-Z0-9._\-]/', '_', basename($path)) . '"');
 readfile($path);

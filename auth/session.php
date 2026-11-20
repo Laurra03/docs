@@ -1,85 +1,61 @@
 <?php
 require_once __DIR__ . '/../config.php';
-// Shared session helper for the typst editor.
-// Call requireAuth() from pages, requireAuthApi() from JSON API endpoints.
+// Session helpers. Pages call requireAuth(); JSON endpoints use requireDoc()
+// or requireUser() from lib.php, which build on currentUser().
 
-function _startSession() {
-    if (session_status() !== PHP_SESSION_ACTIVE) {
-        session_set_cookie_params(['samesite' => 'Lax', 'secure' => true, 'httponly' => true]);
-        session_start();
-    }
+const SESSION_LIFETIME = 60 * 60 * 24 * 14; // 14 days
+
+function _startSession(): void {
+    if (session_status() === PHP_SESSION_ACTIVE) return;
+    ini_set('session.gc_maxlifetime', (string)SESSION_LIFETIME);
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
+    session_set_cookie_params([
+        'lifetime' => SESSION_LIFETIME,
+        'path'     => '/',
+        'samesite' => 'Lax',
+        'secure'   => true,
+        'httponly' => true,
+    ]);
+    session_start();
 }
 
+// Returns the logged-in user or null. The session is read once and then
+// released: PHP holds an exclusive lock on the session file for as long as it
+// is open, which would otherwise make a slow compile block every other request
+// (autosave, file list, …) from the same browser.
+function currentUser(): ?array {
+    static $user = false;
+    if ($user !== false) return $user;
+    if (empty($_COOKIE[session_name()])) return $user = null; // don't create sessions for anonymous API hits
+    _startSession();
+    $user = empty($_SESSION['user_sub']) ? null : [
+        'sub'   => (string)$_SESSION['user_sub'],
+        'name'  => (string)($_SESSION['user_name'] ?? ''),
+        'email' => (string)($_SESSION['user_email'] ?? ''),
+    ];
+    session_write_close();
+    return $user;
+}
+
+// For page requests: redirect to login (and come back here afterwards).
 function requireAuth(): array {
-    _startSession();
-    if (empty($_SESSION['user_sub'])) {
-        header('Location: /auth/login.php');
-        exit;
-    }
-    return ['sub' => $_SESSION['user_sub'], 'name' => $_SESSION['user_name'], 'email' => $_SESSION['user_email'] ?? ''];
+    $user = currentUser();
+    if ($user) return $user;
+    redirectToLogin();
 }
 
-// Looks up a share token from POST or GET, validates it against the
-// document ID in the request, and returns the document owner's user row.
-// Returns null if no token present; exits with 403 if token is invalid or
-// the wrong access level.
-function _getShareTokenUser(bool $requireEdit): ?array {
-    $token = preg_replace('/[^a-f0-9]/', '', $_POST['share_token'] ?? $_GET['share_token'] ?? '');
-    if ($token === '') return null;
-
-    $db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-    if ($db->connect_error) {
-        http_response_code(500);
-        echo json_encode(['ok' => false, 'error' => 'DB error']);
-        exit;
-    }
-
-    $stmt = $db->prepare(
-        "SELECT td.owner, ds.document_id, ds.access
-         FROM document_shares ds
-         JOIN typst_documents td ON td.id = ds.document_id
-         WHERE ds.token = ?"
-    );
-    $stmt->bind_param("s", $token);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    $db->close();
-
-    if (!$row) {
-        http_response_code(403);
-        echo json_encode(['ok' => false, 'error' => 'Invalid share link']);
-        exit;
-    }
-
-    // Share tokens are only valid for requests that name a specific document.
-    // Rejecting id-less requests prevents tokens from acting on endpoints like new.php.
-    $reqDocId = (int)($_POST['document_id'] ?? $_POST['id'] ?? $_GET['document_id'] ?? $_GET['id'] ?? 0);
-    if ($reqDocId === 0 || $reqDocId !== (int)$row['document_id']) {
-        http_response_code(403);
-        echo json_encode(['ok' => false, 'error' => 'Token not valid for this document']);
-        exit;
-    }
-
-    if ($requireEdit && $row['access'] !== 'edit') {
-        http_response_code(403);
-        echo json_encode(['ok' => false, 'error' => 'This link is view-only']);
-        exit;
-    }
-
-    return ['sub' => $row['owner'], 'name' => 'Guest'];
-}
-
-// $requireEdit: pass true in write API endpoints so view-only tokens are rejected.
-function requireAuthApi(bool $requireEdit = false): array {
-    _startSession();
-    if (!empty($_SESSION['user_sub'])) {
-        return ['sub' => $_SESSION['user_sub'], 'name' => $_SESSION['user_name'], 'email' => $_SESSION['user_email'] ?? ''];
-    }
-    $tokenUser = _getShareTokenUser($requireEdit);
-    if ($tokenUser !== null) return $tokenUser;
-
-    http_response_code(401);
-    echo json_encode(['ok' => false, 'error' => 'unauthenticated']);
+function redirectToLogin(): never {
+    $returnTo = $_SERVER['REQUEST_URI'] ?? '/';
+    $url = '/auth/login.php';
+    if (isLocalPath($returnTo) && $returnTo !== '/') $url .= '?return_to=' . rawurlencode($returnTo);
+    header('Location: ' . $url);
     exit;
+}
+
+// Only same-site absolute paths are valid post-login destinations.
+function isLocalPath($path): bool {
+    return is_string($path)
+        && preg_match('#^/(?![/\\\\])[^\x00-\x1f\\\\]*$#', $path) === 1
+        && strpos($path, '/auth/') !== 0;
 }

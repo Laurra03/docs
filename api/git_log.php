@@ -1,25 +1,14 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
 require __DIR__ . '/git_helpers.php';
-$user = requireAuthApi();
+apiInit();
+[, $dir] = requireGitDoc(false);
+if (!is_dir($dir . '/.git')) jsonOut(['ok' => true, 'commits' => []]);
 
-$id  = (int)($_POST['id'] ?? 0);
-$dir = getDocDir($id, $user);
-if (!$dir) { echo json_encode(['ok' => false, 'error' => 'Not found']); exit; }
-
-if (!is_dir($dir . '/.git')) {
-    echo json_encode(['ok' => true, 'commits' => []]);
-    exit;
-}
-
-[, $out] = runGit(['log', '--pretty=format:%h%x09%s', '-15'], $dir);
+[, $out] = runGit(['log', '--pretty=format:%h%x09%an%x09%ar%x09%s', '-30'], $dir);
 $commits = [];
 foreach (explode("\n", trim($out)) as $line) {
-    if (!$line) continue;
-    $tab = strpos($line, "\t");
-    if ($tab === false) continue;
-    $commits[] = ['hash' => substr($line, 0, $tab), 'subject' => substr($line, $tab + 1)];
+    $p = explode("\t", $line, 4);
+    if (count($p) === 4) $commits[] = ['hash' => $p[0], 'author' => $p[1], 'date' => $p[2], 'subject' => $p[3]];
 }
 
-echo json_encode(['ok' => true, 'commits' => $commits]);
+jsonOut(['ok' => true, 'commits' => $commits]);

@@ -1,40 +1,22 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
 require __DIR__ . '/git_helpers.php';
-$user = requireAuthApi(true);
+apiInit();
+[$doc, $dir] = requireGitDoc();
 
-$id     = (int)($_POST['id'] ?? 0);
-$branch = preg_replace('/[^a-zA-Z0-9_.\-]/', '', trim($_POST['branch'] ?? ''));
-$create = !empty($_POST['create']);
+$branch = cleanBranch($_POST['branch'] ?? '');
+if ($branch === '') fail('Invalid branch name');
 
-if (!$branch || strpos($branch, '..') !== false) {
-    echo json_encode(['ok' => false, 'error' => 'Invalid branch name']);
-    exit;
-}
-
-$dir = getDocDir($id, $user);
-if (!$dir) { echo json_encode(['ok' => false, 'error' => 'Not found']); exit; }
-
-if (!is_dir($dir . '/.git')) {
-    echo json_encode(['ok' => false, 'error' => 'Git not initialized']);
-    exit;
-}
-
-$sshEnv = ['GIT_SSH_COMMAND' => gitSshCommand($user['sub'])];
-
-if ($create) {
-    [$code,, $err] = runGit(['checkout', '-b', $branch], $dir, $sshEnv);
+if (!empty($_POST['create'])) {
+    [$code,, $err] = runGit(['checkout', '-b', $branch], $dir);
 } else {
-    // Try local first, then try tracking remote
-    [$code, $out, $err] = runGit(['checkout', $branch], $dir, $sshEnv);
+    // Try local first, then a tracking branch for the remote one
+    [$code,, $err] = runGit(['checkout', $branch, '--'], $dir);
     if ($code !== 0) {
-        [$code, $out, $err] = runGit(['checkout', '-b', $branch, 'origin/' . $branch], $dir, $sshEnv);
+        [$code2,, $err2] = runGit(['checkout', '-b', $branch, '--track', 'origin/' . $branch], $dir);
+        if ($code2 === 0) $code = 0;
     }
 }
+if ($code !== 0) fail(trim($err) ?: 'Could not switch branch', 200);
+touchDoc((int)$doc['id']);
 
-if ($code !== 0) {
-    echo json_encode(['ok' => false, 'error' => trim($err)]);
-    exit;
-}
-echo json_encode(['ok' => true, 'branch' => $branch]);
+jsonOut(['ok' => true, 'branch' => $branch]);

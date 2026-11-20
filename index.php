@@ -1,18 +1,12 @@
 <?php
-require __DIR__ . '/auth/session.php';
+require __DIR__ . '/lib.php';
 $user = requireAuth();
 
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-if ($db->connect_error) die("DB error");
-
-$stmt = $db->prepare("SELECT id, title, updated_at FROM typst_documents WHERE owner=? ORDER BY updated_at DESC");
+$stmt = db()->prepare("SELECT id, title, created_at, updated_at FROM typst_documents WHERE owner=? ORDER BY updated_at DESC");
 $stmt->bind_param("s", $user['sub']);
 $stmt->execute();
-$res  = $stmt->get_result();
-$docs = [];
-while ($row = $res->fetch_assoc()) $docs[] = $row;
+$docs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
-$db->close();
 
 $isDark     = ($_COOKIE["darkmode"] ?? "1") !== "1";
 $themeClass = $isDark ? "dark" : "light";
@@ -42,7 +36,7 @@ $themeClass = $isDark ? "dark" : "light";
         <i class="ri-add-line" style="vertical-align:middle;margin-right:4px"></i>New Document
     </button>
     <div class="user-avatar-wrap">
-        <button class="user-avatar" onclick="toggleUserMenu(event)"><?= strtoupper(mb_substr($user['name'], 0, 1)) ?></button>
+        <button class="user-avatar" onclick="toggleUserMenu(event)"><?= htmlspecialchars(mb_strtoupper(mb_substr($user['name'], 0, 1))) ?></button>
         <div class="user-menu" id="userMenu">
             <div class="user-menu-header"><?= htmlspecialchars($user['name']) ?></div>
             <a href="/settings" class="user-menu-item"><i class="ri-settings-4-line"></i>Settings</a>
@@ -78,7 +72,7 @@ $themeClass = $isDark ? "dark" : "light";
     <?php else: ?>
     <div class="doc-grid">
         <?php foreach ($docs as $doc): ?>
-        <div class="doc-card" onclick="openDoc(<?= (int)$doc['id'] ?>)" data-title="<?= htmlspecialchars(strtolower($doc['title'])) ?>" data-updated="<?= strtotime($doc['updated_at'] ?? '') ?>" data-created="<?= strtotime($doc['created_at'] ?? '') ?>">
+        <div class="doc-card" onclick="openDoc(<?= (int)$doc['id'] ?>)" data-title="<?= htmlspecialchars(mb_strtolower($doc['title'])) ?>" data-updated="<?= (int)strtotime($doc['updated_at'] ?? '') ?>" data-created="<?= (int)strtotime($doc['created_at'] ?? '') ?>">
             <div class="doc-card-preview">
                 <i class="ri-file-text-line" style="font-size:56px"></i>
             </div>

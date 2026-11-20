@@ -50,3 +50,5 @@ rewrite ^/settings$           /settings.php last;
 rewrite ^/editor/(\d+)$       /editor.php   last;
 rewrite ^/shared/([a-f0-9]+)$ /shared.php?t=$1 last;
 ```
+
+Also copy the access rules from `docker/nginx.conf`: `/data/` and `/ssh_keys/` must be blocked with `location ^~` (a plain prefix block loses to the `\.php$` regex, which would let uploaded `.php` files execute), and raise PHP's `upload_max_filesize` / `post_max_size` as in `docker/php.ini`.

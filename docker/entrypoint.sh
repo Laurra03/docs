@@ -32,6 +32,17 @@ chown -R www-data:www-data /var/www/html/data /var/www/html/ssh_keys
 mkdir -p /var/lib/nginx/tmp/client_body
 chown -R www-data:www-data /var/lib/nginx/tmp
 
+# PHP sessions live outside /tmp so the tmp reaper and typst never touch them
+mkdir -p /var/lib/php/sessions
+chown www-data:www-data /var/lib/php/sessions
+chmod 700 /var/lib/php/sessions
+
+# Compile workspaces do not survive a restart (their watcher processes are gone)
+rm -rf /tmp/typst_proj_*
+
+# Reap idle typst watchers
+su -s /bin/sh www-data -c /reaper.sh &
+
 # Start php-fpm in background
 php-fpm --daemonize
 

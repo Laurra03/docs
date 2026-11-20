@@ -1,41 +1,22 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
-$user = requireAuthApi(true);
+// Rename/move a file (or folder) inside a project. Shared by the .typ file
+// list and the asset list; image_move.php is a thin alias with other param names.
+require_once __DIR__ . '/../lib.php';
+apiInit();
+$doc = requireDoc((int)($_POST['document_id'] ?? 0), 'edit');
 
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-if ($db->connect_error) { echo json_encode(['ok'=>false,'error'=>'DB error']); exit; }
+[$old, $oldPath] = docPath($doc, $_POST['filename'] ?? $_POST['old_filename'] ?? '');
+[$new, $newPath] = docPath($doc, $_POST['new_filename'] ?? '', true);
 
-$doc_id   = (int)($_POST['document_id'] ?? 0);
-$filename = trim($_POST['filename'] ?? '', '/');
-$newname  = trim($_POST['new_filename'] ?? '', '/');
+if ($old === $new)          fail('Invalid filename');
+if ($old === 'main.typ')    fail('main.typ cannot be renamed');
+if (!file_exists($oldPath)) fail('File not found', 404);
+if (file_exists($newPath))  fail('A file with that name already exists');
+if (is_dir($oldPath) && strpos($new . '/', $old . '/') === 0) fail('Cannot move a folder into itself');
 
-if (!$filename || !$newname) { echo json_encode(['ok'=>false,'error'=>'Filename required']); exit; }
-if (strpos($filename, '..') !== false || strpos($newname, '..') !== false) {
-    echo json_encode(['ok'=>false,'error'=>'Invalid filename']); exit;
-}
-if (!preg_match('/^[a-zA-Z0-9._\-]+(\/[a-zA-Z0-9._\-]+)*$/', $newname)) {
-    echo json_encode(['ok'=>false,'error'=>'Invalid filename']); exit;
-}
+ensureParentDir($newPath);
+if (!rename($oldPath, $newPath)) fail('Move failed', 500);
+pruneEmptyDirs(dirname($oldPath), $doc['dir']);
+touchDoc((int)$doc['id']);
 
-$stmt = $db->prepare("SELECT id FROM typst_documents WHERE id=? AND owner=?");
-$stmt->bind_param("is", $doc_id, $user['sub']);
-$stmt->execute();
-$stmt->store_result();
-$found = $stmt->num_rows > 0;
-$stmt->close();
-$db->close();
-
-if (!$found) { echo json_encode(['ok'=>false,'error'=>'Not found']); exit; }
-
-$base    = __DIR__ . "/../data/{$doc_id}";
-$oldPath = "{$base}/{$filename}";
-$newPath = "{$base}/{$newname}";
-
-if (!is_file($oldPath)) { echo json_encode(['ok'=>false,'error'=>'File not found']); exit; }
-
-$newDir = dirname($newPath);
-if (!is_dir($newDir)) mkdir($newDir, 0777, true);
-rename($oldPath, $newPath);
-
-echo json_encode(['ok' => true, 'filename' => $newname]);
+jsonOut(['ok' => true, 'filename' => $new]);

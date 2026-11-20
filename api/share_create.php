@@ -1,45 +1,22 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
-$user = requireAuthApi();
+// Create the share link, change its access level, or (regenerate=1) replace
+// the token so the old link stops working.
+require __DIR__ . '/../lib.php';
+apiInit();
+$doc = requireDoc((int)($_POST['document_id'] ?? 0), 'owner');
 
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-if ($db->connect_error) { echo json_encode(['ok'=>false,'error'=>'DB error']); exit; }
+$access     = ($_POST['access'] ?? 'view') === 'edit' ? 'edit' : 'view';
+$regenerate = !empty($_POST['regenerate']);
 
-$doc_id = (int)($_POST['document_id'] ?? 0);
-$access = ($_POST['access'] ?? 'view') === 'edit' ? 'edit' : 'view';
+$existing = dbRow("SELECT token FROM document_shares WHERE document_id=?", "i", $doc['id']);
 
-// Verify ownership
-$stmt = $db->prepare("SELECT id FROM typst_documents WHERE id=? AND owner=?");
-$stmt->bind_param("is", $doc_id, $user['sub']);
-$stmt->execute();
-$stmt->store_result();
-$found = $stmt->num_rows > 0;
-$stmt->close();
-
-if (!$found) { $db->close(); echo json_encode(['ok'=>false,'error'=>'Not found']); exit; }
-
-// Get existing share or create new token
-$stmt = $db->prepare("SELECT token FROM document_shares WHERE document_id=?");
-$stmt->bind_param("i", $doc_id);
-$stmt->execute();
-$res = $stmt->get_result();
-$existing = $res->fetch_assoc();
-$stmt->close();
-
-if ($existing) {
+if ($existing && !$regenerate) {
     $token = $existing['token'];
-    $stmt = $db->prepare("UPDATE document_shares SET access=? WHERE document_id=?");
-    $stmt->bind_param("si", $access, $doc_id);
-    $stmt->execute();
-    $stmt->close();
+    dbExec("UPDATE document_shares SET access=? WHERE document_id=?", "si", $access, $doc['id']);
 } else {
     $token = bin2hex(random_bytes(32));
-    $stmt = $db->prepare("INSERT INTO document_shares (document_id, token, access) VALUES (?,?,?)");
-    $stmt->bind_param("iss", $doc_id, $token, $access);
-    $stmt->execute();
-    $stmt->close();
+    dbExec("DELETE FROM document_shares WHERE document_id=?", "i", $doc['id']);
+    dbExec("INSERT INTO document_shares (document_id, token, access) VALUES (?,?,?)", "iss", $doc['id'], $token, $access);
 }
 
-$db->close();
-echo json_encode(['ok'=>true, 'token'=>$token, 'access'=>$access]);
+jsonOut(['ok' => true, 'token' => $token, 'access' => $access]);

@@ -1,19 +1,9 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
-$user = requireAuthApi(true);
+require __DIR__ . '/../lib.php';
+apiInit();
+$doc = requireDoc((int)($_POST['id'] ?? 0), 'owner');
 
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-if ($db->connect_error) { echo json_encode(['ok'=>false,'error'=>'DB error']); exit; }
+$title = cleanTitle($_POST['title'] ?? '');
+dbExec("UPDATE typst_documents SET title=?, updated_at=NOW() WHERE id=?", "si", $title, $doc['id']);
 
-$id    = (int)($_POST['id'] ?? 0);
-$title = trim($_POST['title'] ?? '');
-if (!$title) $title = 'Untitled Document';
-
-$stmt = $db->prepare("UPDATE typst_documents SET title=?, updated_at=NOW() WHERE id=? AND owner=?");
-$stmt->bind_param("sis", $title, $id, $user['sub']);
-$stmt->execute();
-$stmt->close();
-$db->close();
-
-echo json_encode(['ok' => true]);
+jsonOut(['ok' => true, 'title' => $title]);

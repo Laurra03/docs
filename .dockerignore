@@ -1,3 +1,7 @@
 app_data/
 app_ssh_keys/
 .env
+.git
+.gitignore
+.claude
+*.md

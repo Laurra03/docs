@@ -629,6 +629,7 @@ body.settings-page .topbar { position: sticky; top: 0; }
 }
 .file-del > i { font-size: 14px; }
 .file-item:hover .file-del { display: flex; }
+body.read-only .file-del { display: none !important; }
 .file-del:hover { color: #e53935; }
 .folder-item { cursor: pointer; user-select: none; }
 .folder-item:hover { background: var(--hover); color: var(--text); }

@@ -29,3 +29,6 @@ CREATE TABLE IF NOT EXISTS git_user_settings (
     commit_name  VARCHAR(255),
     commit_email VARCHAR(255)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- The library page lists a user's documents by last edit.
+CREATE INDEX IF NOT EXISTS idx_owner_updated ON typst_documents (owner, updated_at);

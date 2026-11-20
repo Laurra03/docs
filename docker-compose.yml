@@ -2,6 +2,7 @@ services:
   app:
     build: .
     restart: unless-stopped
+    init: true   # reap orphaned typst/git processes
     ports:
       - "8023:80"
     env_file: .env

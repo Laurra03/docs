@@ -1,82 +1,50 @@
 <?php
-header('Content-Type: application/json');
-require __DIR__ . '/../auth/session.php';
 require __DIR__ . '/git_helpers.php';
-$user = requireAuthApi(true);
+apiInit();
+$user = requireUser();
 
-$remoteUrl = trim($_POST['remote_url'] ?? '');
-$branch    = preg_replace('/[^a-zA-Z0-9_.\-]/', '', trim($_POST['branch'] ?? 'main')) ?: 'main';
-$title     = trim($_POST['title'] ?? '');
-
-if (!$remoteUrl) { echo json_encode(['ok' => false, 'error' => 'Remote URL required']); exit; }
-if (!preg_match('#^(https://|ssh://|git@)#i', $remoteUrl)) {
-    echo json_encode(['ok' => false, 'error' => 'Remote URL must use https, ssh, or git@ protocol']);
-    exit;
-}
-if (strpos($branch, '..') !== false) $branch = 'main';
+$remoteUrl = trim((string)($_POST['remote_url'] ?? ''));
+$branch    = cleanBranch($_POST['branch'] ?? '', 'main');
+if ($remoteUrl === '') fail('Remote URL required');
+if (!validRemoteUrl($remoteUrl)) fail('Remote URL must be an https://, ssh:// or git@host: address');
 
 // Derive a title from the URL if not provided
-if (!$title) {
-    $title = basename(parse_url($remoteUrl, PHP_URL_PATH) ?: '');
-    $title = preg_replace('/\.git$/i', '', $title) ?: 'Git Project';
-}
+$guess = preg_replace('/\.git$/i', '', basename(preg_replace('#^.*[:/]#', '', rtrim($remoteUrl, '/'))));
+$title = cleanTitle($_POST['title'] ?? '', $guess !== '' ? $guess : 'Git Project');
 
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-if ($db->connect_error) { echo json_encode(['ok' => false, 'error' => 'DB error']); exit; }
+dbExec("INSERT INTO typst_documents (owner, title) VALUES (?, ?)", "ss", $user['sub'], $title);
+$id = (int)db()->insert_id;
+if (!$id) fail('Could not create document', 500);
 
-$stmt = $db->prepare("INSERT INTO typst_documents (owner, title) VALUES (?, ?)");
-$stmt->bind_param("ss", $user['sub'], $title);
-$stmt->execute();
-$id = $db->insert_id;
-$stmt->close();
-$db->close();
+$dir = docDir($id);
+mkdir($dir, 0775, true);
+$env = gitEnv($user);
 
-if (!$id) { echo json_encode(['ok' => false, 'error' => 'Could not create document']); exit; }
+// A failed clone must not leave an empty document behind in the library.
+$abort = function (string $msg) use ($id, $dir): never {
+    rrmdir($dir);
+    dbExec("DELETE FROM typst_documents WHERE id=?", "i", $id);
+    fail($msg, 200);
+};
 
-$dir = __DIR__ . "/../data/{$id}";
-if (!is_dir($dir)) mkdir($dir, 0777, true);
-
-$sshEnv = ['GIT_SSH_COMMAND' => gitSshCommand($user['sub'])];
-
-// Init
 [$code,, $err] = runGit(['init'], $dir);
+if ($code !== 0) $abort('git init failed: ' . trim($err));
+
+[$code,, $err] = runGit(['remote', 'add', 'origin', $remoteUrl], $dir);
+if ($code !== 0) $abort('Invalid remote URL: ' . trim($err));
+
+[$code, $out, $err] = runGit(['fetch', '--depth=50', 'origin'], $dir, $env);
+if ($code !== 0) $abort('Could not fetch from remote: ' . trim($err ?: $out));
+
+[$code,, $err] = runGit(['checkout', '-b', $branch, '--track', 'origin/' . $branch], $dir);
 if ($code !== 0) {
-    echo json_encode(['ok' => false, 'error' => 'git init failed: ' . trim($err)]);
-    exit;
+    $alt = $branch === 'main' ? 'master' : 'main';
+    [$code2] = runGit(['checkout', '-b', $alt, '--track', 'origin/' . $alt], $dir);
+    if ($code2 !== 0) $abort("Branch '$branch' not found. " . trim($err));
 }
 
-// Add remote
-[$code,, $err] = runGit(['remote', 'add', 'origin', $remoteUrl], $dir, $sshEnv);
-if ($code !== 0) {
-    echo json_encode(['ok' => false, 'error' => 'Invalid remote URL: ' . trim($err)]);
-    exit;
-}
+runGit(['submodule', 'update', '--init', '--recursive'], $dir, $env);
 
-// Fetch
-[$code, $out, $err] = runGit(['fetch', '--depth=50', 'origin'], $dir, $sshEnv);
-if ($code !== 0) {
-    echo json_encode(['ok' => false, 'error' => 'Could not fetch from remote: ' . trim($err ?: $out)]);
-    exit;
-}
+if (!file_exists($dir . '/main.typ')) file_put_contents($dir . '/main.typ', '');
 
-// Checkout requested branch
-[$code,, $err] = runGit(['checkout', '-b', $branch, 'origin/' . $branch], $dir, $sshEnv);
-if ($code !== 0) {
-    // Try alternate branch names
-    $altBranch = $branch === 'main' ? 'master' : 'main';
-    [$code2,, $err2] = runGit(['checkout', '-b', $altBranch, 'origin/' . $altBranch], $dir, $sshEnv);
-    if ($code2 !== 0) {
-        echo json_encode(['ok' => false, 'error' => "Branch '$branch' not found. " . trim($err)]);
-        exit;
-    }
-}
-
-// Init and update submodules
-[, $smOut, $smErr] = runGit(['submodule', 'update', '--init', '--recursive'], $dir, $sshEnv);
-
-// Create main.typ if repo doesn't have one
-if (!file_exists($dir . '/main.typ')) {
-    file_put_contents($dir . '/main.typ', '');
-}
-
-echo json_encode(['ok' => true, 'id' => $id]);
+jsonOut(['ok' => true, 'id' => $id]);

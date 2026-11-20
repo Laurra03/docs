@@ -1,7 +1,7 @@
 <?php
-require __DIR__ . '/auth/session.php';
+require __DIR__ . '/lib.php';
 $user = requireAuth();
-$userEmail = htmlspecialchars($_SESSION['user_email'] ?? '');
+$userEmail = htmlspecialchars($user['email']);
 
 $isDark     = ($_COOKIE["darkmode"] ?? "1") !== "1";
 $themeClass = $isDark ? "dark" : "light";
@@ -26,7 +26,7 @@ $themeClass = $isDark ? "dark" : "light";
     </button>
     <span class="topbar-title">Settings</span>
     <div class="user-avatar-wrap">
-        <button class="user-avatar" onclick="toggleUserMenu(event)"><?= strtoupper(mb_substr($user['name'], 0, 1)) ?></button>
+        <button class="user-avatar" onclick="toggleUserMenu(event)"><?= htmlspecialchars(mb_strtoupper(mb_substr($user['name'], 0, 1))) ?></button>
         <div class="user-menu" id="userMenu">
             <div class="user-menu-header"><?= htmlspecialchars($user['name']) ?></div>
             <a href="/auth/logout.php" class="user-menu-item"><i class="ri-logout-box-r-line"></i>Logout</a>

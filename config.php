@@ -9,6 +9,9 @@ define('OIDC_AUTH_ENDPOINT',     getenv('OIDC_AUTH_ENDPOINT'));
 define('OIDC_TOKEN_ENDPOINT',    getenv('OIDC_TOKEN_ENDPOINT'));
 define('OIDC_USERINFO_ENDPOINT', getenv('OIDC_USERINFO_ENDPOINT'));
 define('OIDC_LOGOUT_ENDPOINT',   getenv('OIDC_LOGOUT_ENDPOINT'));
+// Optional: where the provider should send the browser after logout. Only
+// useful with an OIDC end-session endpoint, and must be registered there.
+define('OIDC_POST_LOGOUT_REDIRECT_URI', getenv('OIDC_POST_LOGOUT_REDIRECT_URI') ?: '');
 
 define('DB_HOST', '127.0.0.1');
 define('DB_USER', 'docs');

@@ -1,56 +1,31 @@
 <?php
-require __DIR__ . '/auth/session.php';
+require __DIR__ . '/lib.php';
 
 // Accept /editor/123 (via nginx rewrite) or legacy ?id=123
-$pathParts = explode('/', trim(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/'));
-$pathId = (int)($pathParts[1] ?? 0);
-$id = $pathId ?: (int)($_GET['id'] ?? 0);
+$pathParts = explode('/', trim((string)parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/'));
+$id = (int)($pathParts[1] ?? 0) ?: (int)($_GET['id'] ?? 0);
 
-// Auth: session first, then share token
-$shareToken  = null;
-$shareAccess = null;
-
-_startSession();
-if (!empty($_SESSION['user_sub'])) {
-    $user = ['sub' => $_SESSION['user_sub'], 'name' => $_SESSION['user_name']];
-} elseif (!empty($_GET['token'])) {
-    $shareToken = preg_replace('/[^a-f0-9]/', '', $_GET['token']);
-    $db2 = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-    if ($db2->connect_error) die("DB error");
-    $stmt2 = $db2->prepare(
-        "SELECT td.owner, td.id as doc_id, ds.access
-         FROM document_shares ds
-         JOIN typst_documents td ON td.id = ds.document_id
-         WHERE ds.token = ? AND ds.document_id = ?"
-    );
-    $stmt2->bind_param("si", $shareToken, $id);
-    $stmt2->execute();
-    $shareRow = $stmt2->get_result()->fetch_assoc();
-    $stmt2->close();
-    $db2->close();
-    if (!$shareRow) { http_response_code(403); die("Invalid or expired share link."); }
-    $user        = ['sub' => $shareRow['owner'], 'name' => 'Guest'];
-    $shareAccess = $shareRow['access'];
-} else {
-    header('Location: /auth/login.php');
+// Owner via session, anyone else (logged in or not) via a share token
+$reqToken = preg_replace('/[^a-f0-9]/', '', (string)($_GET['token'] ?? ''));
+$doc      = resolveDocAccess($id, $reqToken);
+if (!$doc) {
+    if ($reqToken !== '') { http_response_code(403); die("Invalid or expired share link."); }
+    if (!currentUser()) redirectToLogin();
+    header("Location: /");
     exit;
 }
 
-$db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-if ($db->connect_error) die("DB error");
+$isOwner     = $doc['access'] === 'owner';
+$shareToken  = $isOwner ? null : $doc['token'];
+$shareAccess = $isOwner ? null : $doc['access'];
+$user        = $isOwner ? $doc['user'] : ['sub' => '', 'name' => 'Guest'];
 
-$stmt = $db->prepare("SELECT id, title FROM typst_documents WHERE id=? AND owner=?");
-$stmt->bind_param("is", $id, $user['sub']);
-$stmt->execute();
-$res = $stmt->get_result();
-$doc = $res->fetch_assoc();
-$stmt->close();
-$db->close();
-
-if (!$doc) { header("Location: /"); exit; }
-
-$mainTypPath    = __DIR__ . "/data/{$id}/main.typ";
+$mainTypPath    = docDir($id) . '/main.typ';
 $doc['content'] = is_file($mainTypPath) ? file_get_contents($mainTypPath) : '';
+
+// The share token is in the URL: never send it to third parties in a Referer.
+header('Referrer-Policy: same-origin');
+header('Cache-Control: no-store');
 
 $isDark = ($_COOKIE["darkmode"] ?? "1") !== "1";
 $themeClass = $isDark ? "dark" : "light";
@@ -238,11 +213,11 @@ html, body { height: 100%; overflow: hidden; }
 .light .cm-error-mark { text-decoration: underline wavy #cc0000; }
 </style>
 </head>
-<body class="<?= $themeClass ?>">
+<body class="<?= $themeClass ?><?= $shareAccess === 'view' ? ' read-only' : '' ?>">
 
 <!-- Top bar -->
 <div class="editor-topbar">
-    <button class="editor-topbar-back" onclick="window.location.href='/'" title="Back to library">
+    <button class="editor-topbar-back" onclick="window.location.href='/'" title="Back to library"<?= $isOwner ? '' : ' style="visibility:hidden"' ?>>
         <i class="ri-arrow-left-s-line"></i>
     </button>
     <?php if ($shareAccess === 'view'): ?>
@@ -275,7 +250,7 @@ html, body { height: 100%; overflow: hidden; }
     </button>
     <?php else: ?>
     <div class="user-avatar-wrap">
-        <button class="user-avatar" onclick="toggleUserMenu(event)"><?= strtoupper(mb_substr($user['name'], 0, 1)) ?></button>
+        <button class="user-avatar" onclick="toggleUserMenu(event)"><?= htmlspecialchars(mb_strtoupper(mb_substr($user['name'], 0, 1))) ?></button>
         <div class="user-menu" id="userMenu">
             <div class="user-menu-header"><?= htmlspecialchars($user['name']) ?></div>
             <a href="/settings" class="user-menu-item"><i class="ri-settings-4-line"></i>Settings</a>
@@ -505,7 +480,7 @@ html, body { height: 100%; overflow: hidden; }
                 <button class="find-btn" id="replaceAllBtn" style="font-size:11px;padding:3px 7px">All</button>
             </div>
         </div>
-        <textarea id="codeEditor"><?= htmlspecialchars($doc['content'] ?? '') ?></textarea>
+        <textarea id="codeEditor"><?= htmlspecialchars($doc['content'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE) ?></textarea>
     </div>
 
     <!-- Drag handle -->
@@ -1038,8 +1013,10 @@ var SHARE_ACCESS        = <?= json_encode($shareAccess) ?>;
 if (SHARE_TOKEN) {
     var _origSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function(body) {
-        if (typeof body === 'string' && body.indexOf('share_token=') === -1) {
-            body += '&share_token=' + encodeURIComponent(SHARE_TOKEN);
+        if (body instanceof FormData) {
+            if (!body.has('share_token')) body.append('share_token', SHARE_TOKEN);
+        } else if (typeof body === 'string' && body.indexOf('share_token=') === -1) {
+            body += (body ? '&' : '') + 'share_token=' + encodeURIComponent(SHARE_TOKEN);
         }
         _origSend.call(this, body);
     };
@@ -1377,6 +1354,22 @@ function makeFileItem(id, filename, isActive, depth) {
     return div;
 }
 
+// The server identifies files by path, so after a rename the id, the content
+// cache and the active-file pointer all have to follow the new path.
+function applyFileRename(oldId, newName) {
+    var entry = extraFiles.find(function(f) { return f.id === oldId; });
+    if (entry) { entry.id = newName; entry.filename = newName; }
+    if (fileCache[oldId] !== undefined) { fileCache[newName] = fileCache[oldId]; delete fileCache[oldId]; }
+    if (activeFile.id === oldId && !activeFile.isAsset) { activeFile.id = newName; activeFile.filename = newName; }
+    if (entryFile === oldId) setEntryFile(newName);
+}
+function applyImageRename(oldName, newName) {
+    var idx = projectImages.indexOf(oldName);
+    if (idx !== -1) projectImages[idx] = newName;
+    if (assetCache[oldName] !== undefined) { assetCache[newName] = assetCache[oldName]; delete assetCache[oldName]; }
+    if (activeFile.isAsset && activeFile.filename === oldName) activeFile.filename = newName;
+}
+
 function moveFile(file, newFilename) {
     if (file.filename === newFilename) return;
     var xhr = new XMLHttpRequest();
@@ -1387,9 +1380,7 @@ function moveFile(file, newFilename) {
         try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
         if (!res.ok) { alert(res.error || 'Move failed'); return; }
         // Update local state
-        var entry = extraFiles.find(function(f) { return f.id === file.id; });
-        if (entry) entry.filename = res.filename;
-        if (activeFile.id === file.id) activeFile.filename = res.filename;
+        applyFileRename(file.id, res.filename);
         renderFileList();
     };
     xhr.send('filename=' + encodeURIComponent(file.filename) + '&document_id=' + DOC_ID + '&new_filename=' + encodeURIComponent(newFilename));
@@ -1408,25 +1399,21 @@ function moveFolder(oldPath, newPath) {
         }
     });
     updatedLocal.forEach(function(pair) { localFolders.delete(pair[0]); localFolders.add(pair[1]); });
-    if (!toMove.length) { renderFileList(); return; }
-    var pending = toMove.length;
-    toMove.forEach(function(file) {
-        var newFilename = newPath + file.filename.slice(oldPath.length);
-        var xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/file_rename.php', true);
-        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-        xhr.onload = function() {
-            var res;
-            try { res = JSON.parse(xhr.responseText); } catch(e) {}
-            if (res && res.ok) {
-                file.filename = res.filename;
-                if (activeFile.id === file.id) activeFile.filename = res.filename;
-            }
-            if (--pending === 0) renderFileList();
-        };
-        xhr.onerror = function() { if (--pending === 0) renderFileList(); };
-        xhr.send('filename=' + encodeURIComponent(file.filename) + '&document_id=' + DOC_ID + '&new_filename=' + encodeURIComponent(newFilename));
-    });
+    var imgsToMove = projectImages.filter(function(n) { return n.startsWith(oldPath + '/'); });
+    if (!toMove.length && !imgsToMove.length) { renderFileList(); return; }
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/file_rename.php', true);
+    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+    xhr.onload = function() {
+        var res;
+        try { res = JSON.parse(xhr.responseText); } catch(e) {}
+        if (!res || !res.ok) { alert((res && res.error) || 'Move failed'); loadFileList(); loadImageList(); return; }
+        toMove.forEach(function(f) { applyFileRename(f.id, newPath + f.id.slice(oldPath.length)); });
+        imgsToMove.forEach(function(n) { applyImageRename(n, newPath + n.slice(oldPath.length)); });
+        if (collapsedFolders.has(oldPath)) { collapsedFolders.delete(oldPath); collapsedFolders.add(newPath); }
+        renderFileList();
+    };
+    xhr.send('filename=' + encodeURIComponent(oldPath) + '&document_id=' + DOC_ID + '&new_filename=' + encodeURIComponent(newPath));
 }
 
 function deleteFolder(path) {
@@ -1500,7 +1487,7 @@ function switchFile(file) {
         fileCache[activeFile.id] = editor.getValue();
     }
     // Save current file immediately (skip if asset content never loaded)
-    if (assetLoaded) saveCurrentFile();
+    if (assetLoaded && isDirty) saveCurrentFile();
 
     activeFile = file;
 
@@ -1551,7 +1538,7 @@ function switchFile(file) {
 }
 
 // mainContent tracks the in-memory main file content
-var mainContent = <?= json_encode($doc['content'] ?? '') ?>;
+var mainContent = <?= json_encode($doc['content'] ?? '', JSON_FLAGS | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
 
 function addFile() {
     var name = prompt('New file path (e.g. chapter1.typ or chapters/intro.typ):');
@@ -1562,10 +1549,16 @@ function addFile() {
     xhr.onload = function() {
         var res;
         try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
-        if (res.ok) {
+        if (res.ok && !/\.typ$/i.test(res.filename)) {
+            assetCache[res.filename] = '';
+            if (projectImages.indexOf(res.filename) === -1) projectImages.push(res.filename);
+            switchFile({ id: null, filename: res.filename, isAsset: true });
+            loadImageList();
+        } else if (res.ok) {
             fileCache[res.id] = '';
-            loadFileList();
+            if (!extraFiles.find(function(f) { return f.id === res.id; })) extraFiles.push({ id: res.id, filename: res.filename });
             switchFile({ id: res.id, filename: res.filename });
+            loadFileList();
         } else {
             alert(res.error || 'Error creating file');
         }
@@ -1758,8 +1751,7 @@ function moveImage(oldFilename, newFilename) {
         var res;
         try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
         if (!res.ok) { alert(res.error || 'Move failed'); return; }
-        var idx = projectImages.indexOf(oldFilename);
-        if (idx !== -1) projectImages[idx] = res.filename;
+        applyImageRename(oldFilename, res.filename);
         renderFileList();
     };
     xhr.send('document_id=' + DOC_ID +
@@ -1870,7 +1862,7 @@ function batchSaveTextFile(filename, content, onComplete) {
     if (filename === 'main.typ') {
         mainContent = content;
         if (activeFile.id === null) editor.setValue(content);
-        var title = document.getElementById('docTitle').value || 'Untitled Document';
+        var title = getDocTitle();
         var x1 = new XMLHttpRequest();
         x1.open('POST', '/api/save.php', true);
         x1.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -1973,6 +1965,7 @@ editor.on('change', function() {
     updateStats();
     if (SHARE_ACCESS === 'view') return; // view-only: no saves
     isDirty = true;
+    changeSeq++;
     clearTimeout(saveTimer);
     clearTimeout(liveTimer);
     setIndicator('…');
@@ -2047,60 +2040,135 @@ function saveCurrentFile() {
     if (gitGutterActive) loadGitGutter();
 }
 
-function saveAssetFile(filename, content) {
-    assetCache[filename] = content;
+function getDocTitle() {
+    var el = document.getElementById('docTitle');
+    return ((el.value !== undefined ? el.value : el.textContent) || '').trim() || 'Untitled Document';
+}
+
+// All saves go through sendSave(). It guarantees that
+//  - a save requested while another one for the same file is in flight is
+//    re-sent afterwards with the latest content instead of being dropped,
+//  - "Saved" is only shown when the server really confirmed the write
+//    (an expired session used to look like a successful save),
+//  - isDirty stays set if the user typed while the request was running.
+var changeSeq  = 0;   // bumped on every edit
+var saving     = {};  // key → true while a request is in flight
+var saveAgain  = {};  // key → function to re-run when it finishes
+var saveWaiters = [];
+
+function sendSave(key, url, bodyFn) {
+    if (SHARE_ACCESS === 'view') return;
+    if (saving[key]) { saveAgain[key] = function() { sendSave(key, url, bodyFn); }; return; }
+    saving[key] = true;
+    var seq = changeSeq;
     setIndicator('Saving…');
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/asset_save.php', true);
+    xhr.open('POST', url, true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+    function finish(ok, msg) {
+        delete saving[key];
+        if (ok) {
+            if (seq === changeSeq) isDirty = false;
+            var now = new Date();
+            var hm = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+            setIndicator('Saved ' + hm);
+            document.getElementById('sidebarSaved').textContent = hm;
+        } else {
+            isDirty = true;
+            setIndicator(msg);
+        }
+        var again = saveAgain[key];
+        delete saveAgain[key];
+        if (again && ok) { again(); return; }
+        if (!Object.keys(saving).length) {
+            var waiters = saveWaiters; saveWaiters = [];
+            waiters.forEach(function(cb) { cb(); });
+        }
+    }
     xhr.onload = function() {
-        isDirty = false;
-        var now = new Date();
-        setIndicator('Saved ' + now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0'));
-        document.getElementById('sidebarSaved').textContent =
-            now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+        var res; try { res = JSON.parse(xhr.responseText); } catch(e) {}
+        if (res && res.ok) finish(true);
+        else if (xhr.status === 401) finish(false, 'Not saved - session expired, log in again in another tab');
+        else finish(false, 'Not saved: ' + ((res && res.error) || 'server error'));
     };
-    xhr.onerror = function() { setIndicator('Error'); };
-    xhr.send('document_id=' + DOC_ID + '&filename=' + encodeURIComponent(filename) + '&content=' + encodeURIComponent(content));
+    xhr.onerror = function() { finish(false, 'Not saved - offline?'); };
+    xhr.send(bodyFn());
+}
+
+// Run cb once every pending edit has reached the server.
+function whenSaved(cb) {
+    clearTimeout(saveTimer);
+    if (isDirty && SHARE_ACCESS !== 'view') saveCurrentFile();
+    if (!Object.keys(saving).length) cb(); else saveWaiters.push(cb);
+}
+
+function saveAssetFile(filename, content) {
+    assetCache[filename] = content;
+    sendSave('asset:' + filename, '/api/asset_save.php', function() {
+        return 'document_id=' + DOC_ID + '&filename=' + encodeURIComponent(filename) + '&content=' + encodeURIComponent(assetCache[filename] !== undefined ? assetCache[filename] : content);
+    });
 }
 
 function saveDoc() {
     clearTimeout(saveTimer);
-    if (isSaving) return;
-    isSaving = true;
-    setIndicator('Saving…');
-    var title   = document.getElementById('docTitle').value || 'Untitled Document';
-    var content = (activeFile.id === null && !activeFile.isAsset) ? editor.getValue() : mainContent;
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/save.php', true);
-    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-    xhr.onload = function() {
-        isSaving = false;
-        isDirty = false;
-        var now = new Date();
-        setIndicator('Saved ' + now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0'));
-        document.getElementById('sidebarSaved').textContent =
-            now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    };
-    xhr.onerror = function() { isSaving = false; setIndicator('Error'); };
-    xhr.send('id=' + DOC_ID + '&title=' + encodeURIComponent(title) + '&content=' + encodeURIComponent(content));
+    if (activeFile.id === null && !activeFile.isAsset) mainContent = editor.getValue();
+    sendSave('main', '/api/save.php', function() {
+        return 'id=' + DOC_ID + '&title=' + encodeURIComponent(getDocTitle()) + '&content=' + encodeURIComponent(mainContent);
+    });
 }
 
 function saveExtraFile(id, content) {
     fileCache[id] = content;
-    setIndicator('Saving…');
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/file_save.php', true);
-    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-    xhr.onload = function() {
+    sendSave('file:' + id, '/api/file_save.php', function() {
+        return 'filename=' + encodeURIComponent(id) + '&document_id=' + DOC_ID + '&content=' + encodeURIComponent(fileCache[id] !== undefined ? fileCache[id] : content);
+    });
+}
+
+// Throw away every in-memory copy and re-read the project from the server.
+// Needed after anything that rewrites files behind the editor's back (git
+// pull / sync / branch switch / revert) - otherwise the next autosave would
+// silently overwrite the new files with the stale editor content.
+function reloadFromDisk() {
+    clearTimeout(saveTimer);
+    clearTimeout(liveTimer);
+    fileCache = {};
+    assetCache = {};
+    function show(text) {
+        switchingFile = true;
+        editor.setValue(text);
+        editor.clearHistory();
+        switchingFile = false;
         isDirty = false;
-        var now = new Date();
-        setIndicator('Saved ' + now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0'));
-        document.getElementById('sidebarSaved').textContent =
-            now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    };
-    xhr.onerror = function() { setIndicator('Error'); };
-    xhr.send('filename=' + encodeURIComponent(id) + '&document_id=' + DOC_ID + '&content=' + encodeURIComponent(content));
+        updateStats();
+        renderFileList();
+        if (gitGutterActive) loadGitGutter();
+        compileDoc();
+    }
+    function fetchFile(name, cb) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/file_get.php', true);
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        xhr.onload = function() {
+            var res; try { res = JSON.parse(xhr.responseText); } catch(e) {}
+            cb(res && res.ok ? res.content : null);
+        };
+        xhr.onerror = function() { cb(null); };
+        xhr.send('filename=' + encodeURIComponent(name) + '&document_id=' + DOC_ID);
+    }
+    fetchFile('main.typ', function(main) {
+        mainContent = main === null ? '' : main;
+        loadFileList();
+        loadImageList();
+        var isMain = activeFile.id === null && !activeFile.isAsset;
+        if (isMain) { show(mainContent); return; }
+        var f = activeFile;
+        fetchFile(f.filename, function(text) {
+            if (activeFile !== f) return;
+            if (text === null) { activeFile = { id: null, filename: 'main.typ' }; show(mainContent); return; }
+            if (f.isAsset) assetCache[f.filename] = text; else fileCache[f.id] = text;
+            show(text);
+        });
+    });
 }
 
 // ── Compile ───────────────────────────────────────────────────────────────────
@@ -2187,11 +2255,14 @@ function compileDoc() {
         document.getElementById('sidebarTime').textContent = elapsed;
         var res;
         try { res = JSON.parse(xhr.responseText); } catch(e) {
-            showError("Invalid server response:\n" + xhr.responseText);
+            showError(xhr.status === 413 ? "Project is too large to compile in one request."
+                                         : "Invalid server response (HTTP " + xhr.status + ")");
             return;
         }
+        if (xhr.status === 401) { showError("Session expired - log in again in another tab, then recompile."); return; }
         if (res.ok) {
-            document.getElementById('sidebarStatus').textContent = '✓ OK';
+            document.getElementById('sidebarStatus').textContent = res.warnings ? '⚠ Warnings' : '✓ OK';
+            document.getElementById('sidebarStatus').title = res.warnings || '';
             showPDF(res.pdf, elapsed);
             document.getElementById('pdfDownloadBtn').style.display = 'flex';
         } else {
@@ -2225,7 +2296,7 @@ function compileDoc() {
     var body = 'id=' + DOC_ID + '&content=' + encodeURIComponent(payload_content) + '&entry=' + encodeURIComponent(entryFile);
     if (payload_files.length > 0) body += '&files=' + encodeURIComponent(JSON.stringify(payload_files));
     lastCompileBody = body;
-    xhr.send(body + '&format=pdf');
+    xhr.send(body);
 }
 
 function zoomIn()  { previewZoom = Math.min(3.0, Math.round((previewZoom + 0.25) * 100) / 100); applyZoom(); }
@@ -2274,10 +2345,13 @@ function showPDF(base64, elapsed) {
     var bytes = new Uint8Array(binary.length);
     for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     pageTextCache = {};
+    lastPdfBytes = bytes.slice(); // pdf.js takes ownership of the buffer it is given
     pdfjsLib.getDocument({ data: bytes }).promise.then(function(pdf) {
+        var old = pdfDoc;
         pdfDoc = pdf;
         renderAllPages(elapsed);
-    });
+        if (old) old.destroy(); // free the previous document's worker memory
+    }).catch(function() { showError('Could not display the compiled PDF'); });
 }
 
 function renderAllPages(elapsed) {
@@ -2482,40 +2556,18 @@ document.getElementById('previewWrap').addEventListener('dblclick', function(e) 
     });
 });
 
+var lastPdfBytes = null;
+
 function downloadPDF() {
-    if (!lastCompileBody) return;
-    var btn = document.getElementById('pdfDownloadBtn');
-    var icon = btn.querySelector('i');
-    btn.disabled = true;
-    icon.className = 'ri-loader-4-line';
-    icon.style.animation = 'spin 1s linear infinite';
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/compile.php', true);
-    xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-    xhr.onload = function() {
-        btn.disabled = false;
-        icon.className = 'ri-download-2-line';
-        icon.style.animation = '';
-        var res; try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
-        if (!res.ok) { alert('PDF export failed:\n' + res.error); return; }
-        var binary = atob(res.pdf);
-        var bytes = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        var blob = new Blob([bytes], {type: 'application/pdf'});
-        var url = URL.createObjectURL(blob);
-        var title = document.getElementById('docTitle').value.trim() || 'document';
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = title + '.pdf';
-        a.click();
-        setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
-    };
-    xhr.onerror = function() {
-        btn.disabled = false;
-        icon.className = 'ri-download-2-line';
-        icon.style.animation = '';
-    };
-    xhr.send(lastCompileBody + '&format=pdf');
+    if (!lastPdfBytes) return;
+    var url = URL.createObjectURL(new Blob([lastPdfBytes], {type: 'application/pdf'}));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = getDocTitle().replace(/[\\/:*?"<>|]/g, '_') + '.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
 }
 
 var _errorMarks = [];
@@ -2545,11 +2597,13 @@ function showError(msg) {
     errDiv.innerHTML = '<pre>' + escHtml(msg) + '</pre>';
 
     // Parse Typst error locations: "  ┌─ filename:LINE:COL"
-    var re = /┌─\s+\S+:(\d+):(\d+)/g, m;
+    var re = /┌─\s+(\S+):(\d+):(\d+)/g, m;
     var first = null;
+    var openFile = (activeFile.id === null && !activeFile.isAsset) ? 'main.typ' : activeFile.filename;
     while ((m = re.exec(msg)) !== null) {
-        var line = parseInt(m[1], 10) - 1;
-        var col  = parseInt(m[2], 10) - 1;
+        if (m[1].replace(/^\.?\//, '') !== openFile) continue; // error is in another file
+        var line = parseInt(m[2], 10) - 1;
+        var col  = parseInt(m[3], 10) - 1;
         if (line < 0 || line >= editor.lineCount()) continue;
         editor.addLineClass(line, 'background', 'cm-error-line');
         var lineText = editor.getLine(line) || '';
@@ -2569,7 +2623,7 @@ function showError(msg) {
 }
 
 function escHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ── Drag handle for resizing preview ─────────────────────────────────────────
@@ -2767,7 +2821,7 @@ document.addEventListener('click', function() {
 });
 
 // ── Share popup ───────────────────────────────────────────────────────────────
-var SHARE_BASE_URL = '<?= (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] ?>/shared/';
+var SHARE_BASE_URL = location.origin + '/shared/';
 var shareState = null; // null = unknown, false = no share, {token, access} = has share
 
 function toggleSharePopup(e) {
@@ -2948,6 +3002,7 @@ function loadGitStatus() {
             res.changes.forEach(function(c) {
                 var row = document.createElement('div');
                 row.className = 'git-change-row';
+                row.dataset.path = c.path;
                 var badgeClass = {M:'git-badge-M', A:'git-badge-A', D:'git-badge-D', R:'git-badge-R'}[c.status] || 'git-badge-unknown';
                 var label = c.status === '?' ? 'Delete' : 'Revert';
                 row.innerHTML =
@@ -3016,6 +3071,7 @@ function gitInit() {
         if (!res.ok) { alert('Git init failed: ' + res.error); return; }
         loadGitStatus();
         if (res.output) showGitOutput(res.output);
+        if (url) reloadFromDisk(); // cloning may have replaced the project files
     };
     xhr.send('id=' + DOC_ID + '&remote_url=' + encodeURIComponent(url) + '&branch=' + encodeURIComponent(branch));
 }
@@ -3024,6 +3080,7 @@ function gitPull() {
     var btn = document.querySelector('#gitHasRepo .sidebar-section button[title="Pull"]');
     if (btn) { btn.disabled = true; }
 
+    whenSaved(function() {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/git_pull.php', true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -3031,9 +3088,10 @@ function gitPull() {
         if (btn) btn.disabled = false;
         var res; try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
         showGitOutput(res.output || res.error || '');
-        if (res.ok) loadGitStatus();
+        if (res.ok) { loadGitStatus(); reloadFromDisk(); }
     };
     xhr.send('id=' + DOC_ID);
+    });
 }
 
 function gitCommitPush() {
@@ -3043,14 +3101,15 @@ function gitCommitPush() {
     var checks = document.querySelectorAll('#gitChangesList .git-file-check:checked');
     var files  = [];
     checks.forEach(function(cb) {
-        var pathEl = cb.closest('.git-change-row') && cb.closest('.git-change-row').querySelector('.git-change-path');
-        if (pathEl) files.push(pathEl.textContent.trim());
+        var row = cb.closest('.git-change-row');
+        if (row && row.dataset.path) files.push(row.dataset.path);
     });
 
     var btn = document.getElementById('gitCommitBtn');
     btn.disabled = true;
     btn.innerHTML = '<i class="ri-loader-4-line"></i> Working…';
 
+    whenSaved(function() {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/git_commit_push.php', true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -3065,10 +3124,12 @@ function gitCommitPush() {
         }
     };
     xhr.send('id=' + DOC_ID + '&message=' + encodeURIComponent(msg) + '&files=' + encodeURIComponent(JSON.stringify(files)));
+    });
 }
 
 function gitSwitchBranch(branch) {
     var currentOpt = document.querySelector('#gitBranchSelect option[selected]');
+    whenSaved(function() {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/git_switch_branch.php', true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -3076,8 +3137,10 @@ function gitSwitchBranch(branch) {
         var res; try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
         if (!res.ok) { alert('Could not switch branch: ' + res.error); loadGitStatus(); return; }
         loadGitStatus();
+        reloadFromDisk();
     };
     xhr.send('id=' + DOC_ID + '&branch=' + encodeURIComponent(branch));
+    });
 }
 
 // ── Git gutter (diff markers in code editor) ──────────────────────────────────
@@ -3137,6 +3200,7 @@ function gitSync() {
     btn.disabled = true;
     btn.innerHTML = '<i class="ri-loader-4-line"></i> Syncing…';
 
+    whenSaved(function() {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/git_sync.php', true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -3147,7 +3211,7 @@ function gitSync() {
         if (res.ok) {
             showGitOutput(res.output || '');
             loadGitStatus();
-            if (gitGutterActive) loadGitGutter();
+            reloadFromDisk();
         } else {
             showGitConflictOptions(res.output || res.error || '');
         }
@@ -3157,6 +3221,7 @@ function gitSync() {
         btn.innerHTML = '<i class="ri-refresh-line"></i> Sync with Remote';
     };
     xhr.send('id=' + DOC_ID);
+    });
 }
 
 function showGitConflictOptions(detail) {
@@ -3198,8 +3263,9 @@ function gitSyncRecover(force) {
             '<pre id="gitOutput" class="git-output-box"></pre>';
         wrap.style.display = res.output ? 'block' : 'none';
         if (res.output) document.getElementById('gitOutput').textContent = res.output;
+        if (!res.ok && res.error) alert(res.error);
         loadGitStatus();
-        if (gitGutterActive) loadGitGutter();
+        reloadFromDisk();
     };
     xhr.send('id=' + DOC_ID + '&force=' + (force ? '1' : '0'));
 }
@@ -3214,53 +3280,7 @@ function gitRevertFile(path, status) {
         var res; try { res = JSON.parse(xhr.responseText); } catch(e) { return; }
         if (!res.ok) { alert('Revert failed: ' + res.error); return; }
         loadGitStatus();
-        if (gitGutterActive) loadGitGutter();
-        // Refresh editor if the reverted file is currently open
-        var isMainTyp  = (path === 'main.typ' || path === entryFile) && activeFile.id === null && !activeFile.isAsset;
-        var isExtraTyp = activeFile.id !== null && activeFile.id === path;
-        var isAsset    = activeFile.isAsset && activeFile.filename === path;
-        if (isMainTyp || isExtraTyp || isAsset) {
-            if (status === '?') {
-                // File was deleted - clear editor
-                if (isMainTyp) { mainContent = ''; editor.setValue(''); }
-                else if (isExtraTyp) { delete fileCache[path]; editor.setValue(''); }
-                else { delete assetCache[path]; editor.setValue(''); }
-            } else if (isMainTyp) {
-                // Reload main.typ from server
-                var xr = new XMLHttpRequest();
-                xr.open('POST', '/api/file_get.php', true);
-                xr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-                xr.onload = function() {
-                    var r; try { r = JSON.parse(xr.responseText); } catch(e) { return; }
-                    if (r.ok) {
-                        mainContent = r.content;
-                        if (activeFile.id === null && !activeFile.isAsset) editor.setValue(r.content);
-                    }
-                };
-                xr.send('filename=main.typ&document_id=' + DOC_ID);
-            } else if (isExtraTyp) {
-                delete fileCache[path];
-                var xr = new XMLHttpRequest();
-                xr.open('POST', '/api/file_get.php', true);
-                xr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-                xr.onload = function() {
-                    var r; try { r = JSON.parse(xr.responseText); } catch(e) { return; }
-                    if (r.ok) {
-                        fileCache[path] = r.content;
-                        if (activeFile.id === path) editor.setValue(r.content);
-                    }
-                };
-                xr.send('filename=' + encodeURIComponent(path) + '&document_id=' + DOC_ID);
-            } else if (isAsset) {
-                delete assetCache[path];
-                fetch(imageServeUrl(path))
-                    .then(function(r) { return r.text(); })
-                    .then(function(text) {
-                        assetCache[path] = text;
-                        if (activeFile.isAsset && activeFile.filename === path) editor.setValue(text);
-                    });
-            }
-        }
+        reloadFromDisk();
     };
     xhr.send('id=' + DOC_ID + '&path=' + encodeURIComponent(path));
 }
@@ -3278,6 +3298,7 @@ function loadGitLog() {
         res.commits.forEach(function(c) {
             var row = document.createElement('div');
             row.className = 'git-log-row';
+            row.title = (c.author || '') + (c.date ? ' · ' + c.date : '');
             row.innerHTML = '<span class="git-log-hash">' + escapeHtml(c.hash) + '</span>' +
                             '<span class="git-log-subject">' + escapeHtml(c.subject) + '</span>';
             list.appendChild(row);
